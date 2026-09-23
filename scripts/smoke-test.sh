@@ -144,7 +144,14 @@ E1="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/evaluate" -H 'co
 E2="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/evaluate" -H 'content-type: application/json' -d '{"mode":"mock","state":"x","questions":{}}')"
 [[ "$E2" == "400" || "$E2" == "502" ]] && ok "empty questions rejected → $E2" || bad "empty questions → $E2"
 E3="$(curl -s -X POST "$BASE/api/evaluate" -H 'content-type: application/json' -d '{"mode":"parallel","state":"x","questions":{"q":{"type":"noul","instructions":"y"}}}')"
-check "no API key → helpful error" 'No API key' "$E3"
+# This assertion only holds when the server has no LLM key. If a key IS
+# configured (e.g. a developer .env pointing at Ollama), the real call
+# succeeds, so skip rather than report a false failure.
+if curl -s "$BASE/api/config" | grep -q '"key_configured":true'; then
+  note "LLM key is configured → skipping the no-key error assertion"
+else
+  check "no API key → helpful error" 'No API key' "$E3"
+fi
 E4="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/nope")"
 [[ "$E4" == "404" ]] && ok "unknown api route → 404" || bad "unknown api route → $E4"
 

@@ -5,24 +5,25 @@
 Give it any state (a support ticket, a clinical note, a sales email, a JSON blob) plus a set of *typed*
 questions, and it returns calibrated, machine-readable answers — not free text.
 
+![myJEV playground](docs/screenshots/01-playground-dark.png)
+
 ```jsonc
 // POST /api/evaluate
 {
   "mode": "parallel",
-  "state": "This is the SECOND month I've been billed twice for the Pro plan. Fix it ASAP!!",
+  "state": "{\"ticket_id\":\"SUP-48213\",\"subject\":\"Charged twice, and the billing page is broken\",\"message\":\"I was charged twice and the billing dashboard throws an error every time I open it.\"}",
   "questions": {
-    "department": {
+    "team": {
       "type": "choice",
-      "instructions": "Which team should handle this?",
+      "instructions": "Which team should own this ticket?",
       "criteria": {
         "billing":   "Charges, refunds, invoices",
-        "technical": "Bugs or product issues",
-        "account":   "Login / access problems",
-        "other":     "Doesn't fit above"
+        "technical": "Bugs or broken product behaviour",
+        "account":   "Login and access problems"
       }
     },
-    "urgency": { "type": "score", "instructions": "How urgent?", "criteria": ["Low","Medium","High","Critical"] },
-    "angry":   { "type": "noul",  "instructions": "Is the customer expressing strong frustration?" }
+    "severity": { "type": "score", "instructions": "How severe is this ticket?", "criteria": ["Low - no real impact","Medium - annoying but workable","High - customer is blocked","Critical - churn risk"] },
+    "angry":    { "type": "noul",  "instructions": "Is the customer expressing strong frustration?" }
   }
 }
 ```
@@ -32,15 +33,15 @@ questions, and it returns calibrated, machine-readable answers — not free text
 {
   "model": "gpt-4o-mini",
   "answers": {
-    "department": { "type": "choice", "choice": "billing", "confidence": 0.928,
-                    "probabilities": { "billing": 0.856, "technical": 0.051, "account": 0.051, "other": 0.043 } },
-    "urgency":    { "type": "score", "score": 2.67, "confidence": 0.77,
-                    "legend": { "0": "Low", "1": "Medium", "2": "High", "3": "Critical" },
-                    "probabilities": { "0": 0, "1": 0.006, "2": 0.316, "3": 0.678 } },
-    "angry":      { "type": "noul", "noul": 0.818 }
+    "team":     { "type": "choice", "choice": "billing", "confidence": 0.92,
+                  "probabilities": { "billing": 0.85, "technical": 0.14, "account": 0.01 } },
+    "severity": { "type": "score", "score": 2.49, "confidence": 0.50,
+                  "legend": { "0": "Low - no real impact", "1": "Medium - annoying but workable", "2": "High - customer is blocked", "3": "Critical - churn risk" },
+                  "probabilities": { "0": 0, "1": 0.001, "2": 0.507, "3": 0.492 } },
+    "angry":    { "type": "noul", "noul": 0.95 }
   },
   "usage": { "input_tokens": 412, "output_tokens": 24 },
-  "meta": { "mode": "parallel", "latency_ms": 1843, "parallel_calls": 7, "backend": "openai-compatible" }
+  "meta": { "mode": "parallel", "latency_ms": 1843, "parallel_calls": 8, "backend": "openai-compatible" }
 }
 ```
 
@@ -48,6 +49,7 @@ questions, and it returns calibrated, machine-readable answers — not free text
 
 ## Table of contents
 
+- [Screenshots](#screenshots)
 - [Four backends](#four-backends)
 - [Question types](#question-types)
 - [Quick start](#quick-start)
@@ -61,6 +63,72 @@ questions, and it returns calibrated, machine-readable answers — not free text
 - [Troubleshooting](#troubleshooting)
 - [Tutorial](#tutorial)
 - [License](#license)
+
+---
+
+## Screenshots
+
+Screenshots below were captured from a live instance running the `parallel`
+backend against a local Ollama model. The offline `mock` backend produces the
+same response shape with no key, GPU or network.
+
+### Playground — dark
+
+Input on the left (state + typed questions), calibrated output on the right:
+probability bars, a score gauge and a bipolar `noul` meter.
+
+![Playground, dark theme](docs/screenshots/01-playground-dark.png)
+
+<details>
+<summary><b>Playground — light theme</b></summary>
+
+![Playground, light theme](docs/screenshots/01-playground-light.png)
+
+</details>
+
+<details>
+<summary><b>The exact request payload</b> — live preview of what will be sent</summary>
+
+![Request preview](docs/screenshots/02-request-preview-dark.png)
+
+</details>
+
+### Batch — score many states at once
+
+Paste JSONL, run it through `/api/evaluate/batch`, export JSONL or CSV:
+
+![Batch panel with results](docs/screenshots/03-batch-dark.png)
+
+### Datasets — built-in scenarios
+
+Five ready-made examples plus your own saved, imported and exported sets:
+
+![Datasets panel](docs/screenshots/04-datasets-dark.png)
+
+### API — copy-paste recipes
+
+Every endpoint, plus the exact cURL / Python / fetch payload for whatever is on screen:
+
+![API panel](docs/screenshots/05-api-dark.png)
+
+### Settings
+
+Backend mode, provider presets, model picker, scoring knobs and appearance:
+
+![Settings drawer, dark theme](docs/screenshots/06-settings-dark.png)
+
+<details>
+<summary><b>Settings — light theme</b></summary>
+
+![Settings drawer, light theme](docs/screenshots/07-settings-light.png)
+
+</details>
+
+### Menu bar
+
+`File` / `Run` / `View` / `Help`, with keyboard shortcuts (`⌘`/`Ctrl` + `↵` to run):
+
+![Menu bar with the Run menu open](docs/screenshots/08-menubar-dark.png)
 
 ---
 
@@ -369,7 +437,9 @@ myJEV/
 │   ├── gen-certs.sh                # self-signed certs for the TLS profile
 │   └── healthcheck.mjs             # container HEALTHCHECK probe (no deps)
 ├── .github/workflows/docker.yml    # CI: typecheck → build → smoke → images → compose e2e
-├── docs/CONFIGURATION.md           # every environment variable
+├── docs/
+│   ├── CONFIGURATION.md            # every environment variable
+│   └── screenshots/                # UI screenshots used in this README
 ├── Makefile · .env.example · .dockerignore
 ├── README.DOCKER.md                # the Docker book
 └── README.md                       # this file
@@ -406,7 +476,7 @@ Everything lives in [`.env.example`](.env.example) and is explained in
 | `MYJEV_CONCURRENCY` | `8` | parallel in-flight scorer calls |
 | `MYJEV_TIMEOUT_MS` | `60000` | per-request LLM timeout |
 | `MYJEV_RETRIES` | `2` | retry count on transient failures |
-| `MYJEV_MAX_TOKENS` | `32` | max tokens per scorer call |
+| `MYJEV_MAX_TOKENS` | `32` | max tokens per scorer call — raise for reasoning models (see [Troubleshooting](#troubleshooting)) |
 | `MYJEV_BATCH_MAX` | `200` | max items per `/api/evaluate/batch` |
 | `MYJEV_SYSTEM_PROMPT_EXTRA` | — | appended to every system prompt |
 
@@ -465,6 +535,34 @@ docker rm -f <container> && docker network rm <name>
 `mock` needs nothing, so prefer it while developing. For real backends set `OPENAI_API_KEY` (or
 `MYJEV_API_KEY`) in `.env` and restart the `api` service. A `400`/`502` on `/api/evaluate` usually means a
 malformed payload — `choice`/`score` questions require `criteria`, not `options`.
+
+**`parallel` returns identical probabilities for every option (e.g. 0.33 / 0.33 / 0.33)**
+
+The micro-scorer could not read a number out of the model's reply, so it fell back to `0.5` for every
+option — which softmaxes to a uniform distribution. The usual cause is `MYJEV_MAX_TOKENS` being too small
+for a **reasoning model**: the model spends the whole budget on hidden reasoning and never emits the
+`{"p": …}` JSON (`finish_reason: "length"`, empty `content`). Raise it, e.g.
+
+```env
+MYJEV_MAX_TOKENS=512     # default is 32, enough only for non-reasoning models
+```
+
+**`Connection error.` when pointing at Ollama / vLLM / LM Studio on the host**
+
+`localhost` inside a container is the container itself, not your machine. Use the host gateway name:
+
+```env
+OPENAI_BASE_URL=http://host.docker.internal:11434/v1
+```
+
+Docker Desktop resolves this automatically. On native Linux/WSL2 Docker the host also resolves it, but
+**do not** add an `extra_hosts: ["host.docker.internal:host-gateway"]` override on WSL2 — it replaces the
+working resolution with the default-bridge gateway, which cannot reach a host service. Verify from inside
+the container with:
+
+```bash
+docker exec myjev-api sh -c 'wget -q -O- http://host.docker.internal:11434/'
+```
 
 **The UI can't reach the API**
 
