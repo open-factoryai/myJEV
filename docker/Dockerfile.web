@@ -1,0 +1,68 @@
+# syntax=docker/dockerfile:1.7
+# ══════════════════════════════════════════════════════════════════════════
+#  myJEV — Web image (static SPA served by nginx, /api proxied upstream)
+#
+#  build:  docker build -f docker/Dockerfile.web -t myjev/web:latest .
+#  run:    docker run --rm -p 8080:8080 myjev/web:latest
+#
+#  The API hostname is resolved through Docker's embedded DNS so the nginx
+#  worker can start even when the api container is not up yet.
+# ══════════════════════════════════════════════════════════════════════════
+
+ARG NODE_VERSION=22
+
+# ── 1. dependencies ────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS deps
+WORKDIR /app
+# Build arg must be ONE whole npm flag (or empty). It cannot hold an inline
+# comment — "# e.g. --registry=…" is passed through as an argument and npm
+# aborts with `EINVALIDTAGNAME: Invalid tag name "#"`.
+ARG NPM_FLAGS=""
+COPY package.json package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci ${NPM_FLAGS} || npm install --no-audit --no-fund ${NPM_FLAGS}
+
+# ── 2. build the SPA ───────────────────────────────────────────────────────
+FROM deps AS build
+ARG VITE_SOURCEMAP=false
+ENV VITE_SOURCEMAP=${VITE_SOURCEMAP}
+WORKDIR /app
+COPY tsconfig.json vite.config.ts index.html ./
+COPY public ./public
+COPY src ./src
+# Client-only typecheck: `npm run typecheck` also checks tsconfig.server.json,
+# but this stage never copies server/ — tsc would fail with TS5058.
+RUN npx tsc --noEmit -p tsconfig.json && npm run build:client
+
+# ── 3. runtime: nginx ──────────────────────────────────────────────────────
+FROM nginx:1.27-alpine AS runtime
+ARG UID=101
+ARG GID=101
+ARG MYJEV_VERSION=2.0.0
+
+ENV MYJEV_VERSION=${MYJEV_VERSION} \
+    NGINX_ENTRYPOINT_WORKER_PROCESSES_AUTOTUNE=
+
+# Unprivileged listen port + writable runtime dirs.
+# Autotune is disabled on purpose: 30-tune-worker-processes.sh rewrites
+# /etc/nginx/nginx.conf with sed, which needs a writable /etc/nginx and would
+# otherwise fail with "Permission denied" and restart-loop the container.
+# nginx.conf already sets `worker_processes auto;`, which is equivalent here.
+RUN set -eux; \
+    mkdir -p /var/cache/nginx/client_temp /var/run /tmp/nginx; \
+    chown -R ${UID}:${GID} /var/cache/nginx /var/run /tmp/nginx /etc/nginx/conf.d; \
+    rm -f /etc/nginx/conf.d/default.conf; \
+    touch /var/run/nginx.pid; \
+    chown ${UID}:${GID} /var/run/nginx.pid
+
+COPY --chown=${UID}:${GID} docker/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY --chown=${UID}:${GID} docker/nginx/conf.d/ /etc/nginx/conf.d/
+COPY --from=build --chown=${UID}:${GID} /app/dist /usr/share/nginx/html
+
+USER ${UID}:${GID}
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=4s --start-period=8s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

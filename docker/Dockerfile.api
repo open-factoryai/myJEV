@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1.7
+# ══════════════════════════════════════════════════════════════════════════
+#  myJEV — API image (Node 22, ESM, bundled server, non-root)
+#
+#  build:  docker build -f docker/Dockerfile.api -t myjev/api:latest .
+#  run:    docker run --rm -p 3001:3001 --env-file .env myjev/api:latest
+#
+#  This image *can* serve the built SPA (dist/ is copied in) so a single
+#  container is enough for small deployments:  http://localhost:3001
+#  In docker-compose the nginx `web` service serves the UI and only proxies
+#  /api here, which is the recommended topology.
+# ══════════════════════════════════════════════════════════════════════════
+
+ARG NODE_VERSION=22
+
+# ── 1. dependencies (full, incl. dev: vite + esbuild + tsc) ────────────────
+FROM node:${NODE_VERSION}-alpine AS deps
+WORKDIR /app
+# Build arg must be ONE whole npm flag (or empty). It cannot hold an inline
+# comment — "# e.g. --registry=…" is passed through as an argument and npm
+# aborts with `EINVALIDTAGNAME: Invalid tag name "#"`.
+ARG NPM_FLAGS=""
+COPY package.json package-lock.json* ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci ${NPM_FLAGS} || npm install --no-audit --no-fund ${NPM_FLAGS}
+
+# ── 2. build (typecheck → server bundle → SPA bundle → prod-only deps) ─────
+FROM deps AS build
+ARG SERVER_MINIFY=true
+ARG SERVER_SOURCEMAP=false
+ENV SERVER_MINIFY=${SERVER_MINIFY} \
+    SERVER_SOURCEMAP=${SERVER_SOURCEMAP}
+WORKDIR /app
+COPY tsconfig.json tsconfig.server.json vite.config.ts index.html ./
+COPY public ./public
+COPY src ./src
+COPY server ./server
+COPY scripts ./scripts
+RUN npm run typecheck
+RUN npm run build:server
+RUN npm run build:client
+# production dependency tree, isolated so we can copy just that into runtime
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --omit=dev --ignore-scripts || npm install --omit=dev --no-audit --no-fund
+
+# ── 3. runtime ─────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS runtime
+ARG UID=1001
+ARG GID=1001
+ARG MYJEV_VERSION=2.0.0
+
+ENV NODE_ENV=production \
+    PORT=3001 \
+    HOST=0.0.0.0 \
+    MYJEV_PROD=true \
+    MYJEV_VERSION=${MYJEV_VERSION} \
+    MYJEV_WEB_ROOT=/app/dist \
+    LOG_FILE=/app/logs/myjev.jsonl \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+WORKDIR /app
+
+RUN apk add --no-cache tini wget \
+ && addgroup -g ${GID} -S myjev \
+ && adduser -u ${UID} -S myjev -G myjev \
+ && mkdir -p /app/logs \
+ && chown -R ${UID}:${GID} /app
+
+COPY --from=build --chown=${UID}:${GID} /app/dist-server ./dist-server
+COPY --from=build --chown=${UID}:${GID} /app/dist ./dist
+COPY --from=build --chown=${UID}:${GID} /app/node_modules ./node_modules
+COPY --chown=${UID}:${GID} package.json ./
+COPY --chown=${UID}:${GID} scripts/healthcheck.mjs ./scripts/healthcheck.mjs
+COPY --chown=${UID}:${GID} docker/entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
+
+USER ${UID}:${GID}
+EXPOSE 3001
+VOLUME ["/app/logs"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node /app/scripts/healthcheck.mjs || exit 1
+
+ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
+CMD ["node", "dist-server/server/index.js"]

@@ -1,0 +1,146 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push images to the registry"
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}
+  NODE_VERSION: "22"
+  PLATFORMS: linux/amd64,linux/arm64
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ─────────────────────────── build + smoke test ───────────────────────────
+  test:
+    name: typecheck · build · smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci || npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build (SPA + server bundle)
+        run: npm run build
+
+      - name: Smoke test (offline, mock backend)
+        run: bash scripts/smoke-test.sh --skip-build
+
+      - name: Upload bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: myjev-dist
+          path: |
+            dist/
+            dist-server/
+          retention-days: 7
+
+  # ───────────────────────────── docker images ──────────────────────────────
+  images:
+    name: docker image · ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [api, web, mock-decider]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        if: github.event_name != 'pull_request'
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/myjev-${{ matrix.image }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push on main/tags)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image == 'mock-decider' && 'docker/mock' || '.' }}
+          file: ${{ matrix.image == 'api' && 'docker/Dockerfile.api' || matrix.image == 'web' && 'docker/Dockerfile.web' || matrix.image == 'mock-decider' && 'docker/mock/Dockerfile' }}
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || inputs.push == true) }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          build-args: |
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            MYJEV_VERSION=${{ github.ref_name }}
+          provenance: false
+
+  # ───────────── run the real stack and probe it over HTTP ──────────────────
+  compose:
+    name: docker compose · end-to-end
+    runs-on: ubuntu-latest
+    needs: images
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Boot stack (web + api + mock)
+        run: |
+          cp .env.example .env
+          sed -i 's|^DECIDER_BASE_URL=.*|DECIDER_BASE_URL=http://mock:8000|' .env
+          docker compose --profile mock up -d --build
+          docker compose --profile mock ps
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/api/health >/dev/null; then echo "healthy after ${i}s"; break; fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8080/api/health | head -c 800; echo
+
+      - name: Health check through nginx
+        run: bash scripts/healthcheck.sh http://localhost:8080
+
+      - name: Container images
+        run: docker images | grep myjev || true
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose --profile mock logs --tail=200

@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "jsx": "preserve",
+    "noEmit": true
+  },
+  "include": ["server", "src/lib/types.ts", "src/lib/evaluate.ts"],
+  "exclude": ["src/components", "src/App.tsx", "src/main.tsx", "src/lib/storage.ts", "src/lib/toast.ts", "src/lib/api.ts", "src/hooks"]
+}

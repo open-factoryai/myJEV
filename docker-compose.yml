@@ -1,0 +1,437 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  myJEV — Docker Compose
+#
+#  Topology (default profile):
+#
+#      browser ──▶ web (nginx :8080) ──/api──▶ api (node :3001) ──▶ LLM provider
+#                                                      └──────────▶ decider (GPU) / mock
+#
+#  ┌─────────────┬──────────────────────────────────────────────────────────────┐
+#  │ command      │ what you get                                                 │
+#  ├─────────────┼──────────────────────────────────────────────────────────────┤
+#  │ up -d        │ web (nginx :8080) + api                                      │
+#  │ --profile mock│ + offline mock-decider (no API key, no GPU needed)          │
+#  │ --profile dev │ + hot-reload dev container on :3001 (bind mounts)          │
+#  │ --profile dev-api│ + API-only dev container on :3002                        │
+#  │ --profile aio │ single all-in-one container (node serves UI+API) on :3001   │
+#  │ --profile gpu │ + Mapika/decider on GPU (:8000)                            │
+#  │ --profile tls │ + Caddy front door, https://localhost:8443                 │
+#  │ --profile ops │ + Watchtower auto-updates                                  │
+#  └─────────────┴──────────────────────────────────────────────────────────────┘
+#
+#  Profiles combine:  docker compose --profile mock --profile tls up -d --build
+#
+#  Configuration lives in .env (see .env.example) — the same file is used for
+#  compose variable substitution AND passed to the api container as env_file.
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: myjev
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${LOG_MAX_SIZE:-10m}"
+    max-file: "${LOG_MAX_FILE:-5}"
+
+x-build-args: &default-build-args
+  NODE_VERSION: ${NODE_VERSION:-22}
+  MYJEV_VERSION: ${MYJEV_VERSION:-2.0.0}
+  UID: ${PUID:-1001}
+  GID: ${PGID:-1001}
+  NPM_FLAGS: ${NPM_FLAGS:-}
+
+x-restart: &restart-policy
+  restart: ${RESTART_POLICY:-unless-stopped}
+
+x-api-environment: &api-environment
+  NODE_ENV: production
+  HOST: 0.0.0.0
+  PORT: 3001
+  MYJEV_PROD: "true"
+  MYJEV_WEB_ROOT: /app/dist
+  MYJEV_VERSION: ${MYJEV_VERSION:-2.0.0}
+  # ── LLM backends (parallel / oneshot) ─────────────────────────────────────
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  MYJEV_API_KEY: ${MYJEV_API_KEY:-}
+  CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  TOGETHER_API_KEY: ${TOGETHER_API_KEY:-}
+  MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+  DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  MYJEV_BASE_URL: ${MYJEV_BASE_URL:-}
+  MYJEV_MODEL: ${MYJEV_MODEL:-}
+  MYJEV_DEFAULT_MODE: ${MYJEV_DEFAULT_MODE:-parallel}
+  MYJEV_TEMPERATURE: ${MYJEV_TEMPERATURE:-0}
+  MYJEV_SOFTMAX_TEMPERATURE: ${MYJEV_SOFTMAX_TEMPERATURE:-1}
+  MYJEV_CONCURRENCY: ${MYJEV_CONCURRENCY:-8}
+  MYJEV_TIMEOUT_MS: ${MYJEV_TIMEOUT_MS:-60000}
+  MYJEV_RETRIES: ${MYJEV_RETRIES:-2}
+  MYJEV_MAX_TOKENS: ${MYJEV_MAX_TOKENS:-32}
+  MYJEV_SYSTEM_PROMPT_EXTRA: ${MYJEV_SYSTEM_PROMPT_EXTRA:-}
+  MYJEV_BATCH_MAX: ${MYJEV_BATCH_MAX:-200}
+  # ── decider backend ───────────────────────────────────────────────────────
+  DECIDER_BASE_URL: ${DECIDER_BASE_URL:-http://mock:8000}
+  DECIDER_API_KEY: ${DECIDER_API_KEY:-}
+  ENABLE_DECIDER: ${ENABLE_DECIDER:-true}
+  # ── security / ops ────────────────────────────────────────────────────────
+  MYJEV_API_TOKEN: ${MYJEV_API_TOKEN:-}
+  REQUIRE_AUTH: ${REQUIRE_AUTH:-false}
+  ALLOW_CLIENT_OVERRIDES: ${ALLOW_CLIENT_OVERRIDES:-true}
+  CORS_ORIGINS: ${CORS_ORIGINS:-}
+  RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+  RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+  BODY_LIMIT: ${BODY_LIMIT:-2mb}
+  TRUST_PROXY: ${TRUST_PROXY:-true}
+  LOG_REQUESTS: ${LOG_REQUESTS:-false}
+  # container paths are pinned here because `environment:` overrides `env_file:`
+  LOG_FILE: ${CONTAINER_LOG_FILE:-/app/logs/myjev.jsonl}
+  LOG_MAX_BYTES: ${LOG_MAX_BYTES:-5242880}
+
+services:
+  # ══════════════════════════ production: nginx + node ══════════════════════
+  web:
+    image: ${IMAGE_NAMESPACE:-myjev}/web:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+      args:
+        <<: *default-build-args
+        VITE_SOURCEMAP: ${VITE_SOURCEMAP:-false}
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-web
+    <<: *restart-policy
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      MYJEV_VERSION: ${MYJEV_VERSION:-2.0.0}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 8s
+    logging: *default-logging
+    networks: [myjev]
+    read_only: ${READ_ONLY_FS:-false}
+    # tmpfs mounts default to root:root, which the unprivileged nginx user (UID
+    # ${PUID:-1001}) cannot write to → nginx dies with "mkdir() ... Permission
+    # denied" and restart-loops. Give each mount the container's own ownership.
+    tmpfs:
+      - /tmp/nginx:uid=${PUID:-1001},gid=${PGID:-1001},mode=0755
+      - /var/cache/nginx:uid=${PUID:-1001},gid=${PGID:-1001},mode=0755
+      - /var/run:uid=${PUID:-1001},gid=${PGID:-1001},mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+
+  api:
+    image: ${IMAGE_NAMESPACE:-myjev}/api:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      args:
+        <<: *default-build-args
+        SERVER_MINIFY: ${SERVER_MINIFY:-true}
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-api
+    <<: *restart-policy
+    environment: *api-environment
+    env_file:
+      - path: .env
+        required: false
+    expose:
+      - "3001"
+    ports:
+      # Comment this out to keep the API private behind nginx.
+      - "${API_PORT:-3001}:3001"
+    healthcheck:
+      test: ["CMD", "node", "/app/scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - myjev_logs:/app/logs
+    logging: *default-logging
+    networks: [myjev]
+    read_only: ${READ_ONLY_FS:-false}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPUS:-2.0}"
+          memory: ${API_MEMORY:-1g}
+        reservations:
+          memory: ${API_MEMORY_RESERVATION:-256m}
+
+  # ══════════════════ all-in-one (single container, node serves UI) ═════════
+  all-in-one:
+    profiles: ["aio"]
+    image: ${IMAGE_NAMESPACE:-myjev}/api:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      args: *default-build-args
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-aio
+    <<: *restart-policy
+    environment:
+      <<: *api-environment
+      MYJEV_PROD: "true"
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${AIO_PORT:-3001}:3001"
+    volumes:
+      - myjev_logs:/app/logs
+    depends_on:
+      api:
+        condition: service_started
+        required: false
+    healthcheck:
+      test: ["CMD", "node", "/app/scripts/healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
+    networks:
+      myjev:
+        aliases: [dev-all]
+
+  # ═════════════════════════ development: hot reload ═══════════════════════
+  dev:
+    profiles: ["dev"]
+    image: ${IMAGE_NAMESPACE:-myjev}/dev:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+        UID: ${DEV_UID:-1000}
+        GID: ${DEV_GID:-1000}
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-dev
+    <<: *restart-policy
+    environment:
+      <<: *api-environment
+      NODE_ENV: development
+      MYJEV_PROD: "false"
+      CHOKIDAR_USEPOLLING: ${CHOKIDAR_USEPOLLING:-true}
+      WATCHPACK_POLLING: ${WATCHPACK_POLLING:-true}
+      VITE_LOG_LEVEL: ${VITE_LOG_LEVEL:-warn}
+    env_file:
+      - path: .env
+        required: false
+    command: npm run dev
+    ports:
+      - "${DEV_PORT:-3001}:3001"
+    volumes:
+      - ./:/app
+      - myjev_node_modules:/app/node_modules
+      - myjev_logs:/app/logs
+    working_dir: /app
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+    # `dev` also answers to the hostname `api` on the compose network, so the
+    # nginx `web` container can front the dev server unchanged.
+    networks:
+      myjev:
+        aliases: [api]
+
+  dev-api:
+    profiles: ["dev-api"]
+    image: ${IMAGE_NAMESPACE:-myjev}/dev:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dev
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+        UID: ${DEV_UID:-1000}
+        GID: ${DEV_GID:-1000}
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-dev-api
+    <<: *restart-policy
+    environment:
+      <<: *api-environment
+      NODE_ENV: development
+      PORT: 3001
+      MYJEV_PROD: "false"
+    env_file:
+      - path: .env
+        required: false
+    command: npx tsx watch server/index.ts
+    ports:
+      - "${DEV_API_PORT:-3002}:3001"
+    volumes:
+      - ./server:/app/server
+      - ./src:/app/src
+      - myjev_node_modules:/app/node_modules
+      - myjev_logs:/app/logs
+    working_dir: /app
+    logging: *default-logging
+    networks: [myjev]
+
+  # ══════════════════ decider backends ═════════════════════════════════════
+  mock:
+    profiles: ["mock"]
+    image: ${IMAGE_NAMESPACE:-myjev}/mock-decider:${IMAGE_TAG:-latest}
+    build:
+      context: docker/mock
+      dockerfile: Dockerfile
+      args:
+        UID: ${PUID:-1001}
+        GID: ${PGID:-1001}
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-mock
+    <<: *restart-policy
+    environment:
+      PORT: 8000
+      HOST: 0.0.0.0
+      MOCK_MODEL: ${MOCK_MODEL:-mock-decider-2b}
+      MOCK_LATENCY_MS: ${MOCK_LATENCY_MS:-80}
+      MOCK_API_KEY: ${DECIDER_API_KEY:-}
+    ports:
+      - "${MOCK_PORT:-8001}:8000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 5s
+    logging: *default-logging
+    networks:
+      myjev:
+        aliases: [decider, mock-decider]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
+  decider:
+    profiles: ["gpu"]
+    image: ${IMAGE_NAMESPACE:-myjev}/decider:${DECIDER_IMAGE_TAG:-latest}
+    build:
+      context: docker/decider
+      dockerfile: Dockerfile
+      args:
+        CUDA_IMAGE: ${DECIDER_CUDA_IMAGE:-nvidia/cuda:12.4.1-runtime-ubuntu22.04}
+        DECIDER_REF: ${DECIDER_REF:-main}
+        DECIDER_MODEL: ${DECIDER_MODEL:-Mapika/decider-2b}
+        BAKE_WEIGHTS: ${DECIDER_BAKE_WEIGHTS:-false}
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-decider
+    <<: *restart-policy
+    environment:
+      DECIDER_MODEL: ${DECIDER_MODEL:-Mapika/decider-2b}
+      PORT: 8000
+      HOST: 0.0.0.0
+      HF_HOME: /models
+      HUGGINGFACE_HUB_CACHE: /models/hub
+      HF_TOKEN: ${HF_TOKEN:-}
+      DECIDER_API_KEY: ${DECIDER_API_KEY:-}
+    ports:
+      - "${DECIDER_PORT:-8000}:8000"
+    volumes:
+      - decider_weights:/models
+      # pre-seeded local weights (uncomment + point at your snapshot):
+      # - ${DECIDER_WEIGHTS_PATH:-./decider-weights}:/models/local:ro
+    shm_size: ${DECIDER_SHM_SIZE:-2gb}
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || curl -fsS http://127.0.0.1:8000/v1/models || exit 1"]
+      interval: 30s
+      timeout: 6s
+      retries: 10
+      start_period: 600s
+    logging: *default-logging
+    networks:
+      myjev:
+        aliases: [decider]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # or: device_ids: ["0"]
+              capabilities: [gpu]
+
+  # ═════════════════════════ optional TLS front door ═══════════════════════
+  caddy:
+    profiles: ["tls"]
+    image: caddy:2-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-caddy
+    <<: *restart-policy
+    depends_on:
+      - web
+      - api
+    ports:
+      - "${TLS_PORT:-8443}:${TLS_PORT:-8443}"
+      - "${CADDY_HTTP_PORT:-8081}:${CADDY_HTTP_PORT:-8081}"
+    environment:
+      MYJEV_HOST: ${MYJEV_HOST:-localhost}
+      MYJEV_TLS_PORT: ${TLS_PORT:-8443}
+      MYJEV_HTTP_PORT: ${CADDY_HTTP_PORT:-8081}
+      MYJEV_TLS_INTERNAL: ${MYJEV_TLS_INTERNAL:-internal}
+      MYJEV_AUTO_HTTPS: ${MYJEV_AUTO_HTTPS:-internal}
+    volumes:
+      - ./docker/nginx/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      # bring your own certificate (then set MYJEV_TLS_INTERNAL="" ):
+      # - ${MYJEV_CERT_DIR:-./certs}:/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "--no-check-certificate", "https://127.0.0.1:${TLS_PORT:-8443}/api/health"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
+    networks: [myjev]
+
+  # ═════════════════════════ optional auto-updates ═════════════════════════
+  watchtower:
+    profiles: ["ops"]
+    image: containrrr/watchtower:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-myjev}-watchtower
+    <<: *restart-policy
+    environment:
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_POLL_INTERVAL: "${WATCHTOWER_POLL_INTERVAL:-86400}"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_REVIVE_STOPPED: "true"
+      WATCHTOWER_LABEL_ENABLE: "false"
+      WATCHTOWER_NOTIFICATIONS: ${WATCHTOWER_NOTIFICATIONS:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ${COMPOSE_PROJECT_NAME:-myjev}-web ${COMPOSE_PROJECT_NAME:-myjev}-api
+    logging: *default-logging
+    networks: [myjev]
+
+networks:
+  myjev:
+    name: ${NETWORK_NAME:-myjev}
+    driver: bridge
+    # expose to another host network (e.g. Ollama on the LAN) if you need it:
+    # external: true
+
+volumes:
+  myjev_logs:
+    name: ${VOLUME_PREFIX:-myjev}_logs
+  myjev_node_modules:
+    name: ${VOLUME_PREFIX:-myjev}_node_modules
+  decider_weights:
+    name: ${VOLUME_PREFIX:-myjev}_decider_weights
+  caddy_data:
+    name: ${VOLUME_PREFIX:-myjev}_caddy_data
+  caddy_config:
+    name: ${VOLUME_PREFIX:-myjev}_caddy_config

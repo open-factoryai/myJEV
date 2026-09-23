@@ -1,0 +1,14 @@
+{
+  "name": "myjev-mock-decider",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic offline stand-in for a Mapika/decider server (POST /v1/systemone). Zero dependencies.",
+  "main": "mock-decider.mjs",
+  "scripts": {
+    "start": "node mock-decider.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.7
+# ══════════════════════════════════════════════════════════════════════════
+#  myJEV — development image (tsx watch + Vite HMR, source bind-mounted)
+#
+#  docker compose --profile dev up -d --build
+#  → http://localhost:3001  (UI + API in one process, hot reload)
+#
+#  Everything except node_modules comes from the bind mount in compose, so you
+#  can edit files on the host and see changes instantly.
+# ══════════════════════════════════════════════════════════════════════════
+
+ARG NODE_VERSION=22
+FROM node:${NODE_VERSION}-bookworm-slim
+
+ARG UID=1000
+ARG GID=1000
+
+ENV NODE_ENV=development \
+    CHOKIDAR_USEPOLLING=true \
+    CHOKIDAR_INTERVAL=250 \
+    WATCHPACK_POLLING=true \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_AUDIT=false
+
+WORKDIR /app
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl tini git \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd -g ${GID} node \
+ && useradd -u ${UID} -g ${GID} -m -s /bin/bash node \
+ && mkdir -p /app/logs \
+ && chown -R ${UID}:${GID} /app
+
+# Dependencies first (better layer caching); the bind mount in compose keeps them.
+COPY --chown=${UID}:${GID} package.json package-lock.json* ./
+RUN --mount=type=cache,target=/home/node/.npm,uid=${UID},gid=${GID} \
+    (npm ci || npm install --no-audit --no-fund) \
+ && npm cache verify
+
+COPY --chown=${UID}:${GID} . .
+
+USER ${UID}:${GID}
+EXPOSE 3001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:3001/api/health >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["npm", "run", "dev"]

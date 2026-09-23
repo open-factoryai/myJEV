@@ -1,0 +1,38 @@
+# ── Build context for docker/Dockerfile.api and docker/Dockerfile.web ──
+# Keep the context small & reproducible: the image must never depend on
+# local node_modules, .env secrets or previous builds.
+**/node_modules
+**/dist
+**/dist-server
+**/coverage
+**/*.tsbuildinfo
+.git
+.github
+.gitignore
+.dockerignore
+**/.DS_Store
+**/*.log
+logs
+data
+
+# ── secrets: never enter an image layer ────────────────────────────────
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/*.crt
+
+# ── not needed to build the app ────────────────────────────────────────
+docs
+README.md
+README.DOCKER.md
+LICENSE.md
+Makefile
+docker-compose*.yml
+compose*.yml
+scripts/docker-build.sh
+scripts/smoke-test.sh
+.vscode
+.idea
+sed*
